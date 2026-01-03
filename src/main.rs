@@ -122,17 +122,26 @@ fn format_filename(name: &str, max_len: usize) -> String {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
+pub fn run(args: &[String], writer: &mut impl std::io::Write) -> Result<(), Box<dyn Error>> {
+    if args.len() < 1 {
+        // This case essentially shouldn't happen with std::env::args() usually having at least 1 (the binary name),
+        // but if we pass a slice of args excluding binary name, we might see 0.
+        // Let's assume input args are [pattern1, pattern2...] (excluding binary name) for the logic loop,
+        // OR we stick to the convention that args[0] is binary name.
+        // The original code used args[1..], so let's stick to receiving the full args vector.
+        return Err("Not enough arguments".into());
+    }
+    
+    // Check if we have patterns (i.e. length >= 2 if args[0] is binary)
     if args.len() < 2 {
-        eprintln!("Usage: {} <file_pattern> [file_pattern...]", args[0]);
-        eprintln!("Supported file types: .txt, .pdf, .docx");
-        eprintln!("Examples:");
-        eprintln!("  {} *.txt", args[0]);
-        eprintln!("  {} *.pdf", args[0]);
-        eprintln!("  {} *.docx", args[0]);
-        eprintln!("  {} docs/*.{{txt,pdf,docx}}", args[0]);
-        std::process::exit(1);
+        writeln!(writer, "Usage: {} <file_pattern> [file_pattern...]", args[0])?;
+        writeln!(writer, "Supported file types: .txt, .pdf, .docx")?;
+        writeln!(writer, "Examples:")?;
+        writeln!(writer, "  {} *.txt", args[0])?;
+        writeln!(writer, "  {} *.pdf", args[0])?;
+        writeln!(writer, "  {} *.docx", args[0])?;
+        writeln!(writer, "  {} docs/*.{{txt,pdf,docx}}", args[0])?;
+        return Err("Invalid usage".into());
     }
 
     let mut grand_total_words = 0;
@@ -142,8 +151,8 @@ fn main() {
     for pattern in &args[1..] {
         match process_files(pattern) {
             Ok(results) => {
-                println!("\nAnalysis for files matching pattern '{}':", pattern);
-                println!("{:-<80}", "");  // Print a separator line
+                writeln!(writer, "\nAnalysis for files matching pattern '{}':", pattern)?;
+                writeln!(writer, "{:-<80}", "")?;  // Print a separator line
                 
                 let mut pattern_total_words = 0;
                 let mut pattern_unique_words = HashSet::new();
@@ -171,45 +180,54 @@ fn main() {
                     let display_name = format_filename(raw_name, FILENAME_WIDTH);
                     
                     // Print file results using fixed-width formatting.
-                    println!(
+                    writeln!(writer,
                         "{:<width$}: {:>10} unique words out of {:>10} total words",
                         display_name,
                         format_number(result.unique_words),
                         format_number(result.total_words),
                         width = FILENAME_WIDTH
-                    );
+                    )?;
                     
                     files_processed += 1;
                 }
 
                 // Print pattern summary.
-                println!("{:-<80}", "");  // Separator line
-                println!(
+                writeln!(writer, "{:-<80}", "")?;  // Separator line
+                writeln!(writer,
                     "Summary for pattern: {:>10} unique words out of {:>10} total words\n",
                     format_number(pattern_unique_words.len()),
                     format_number(pattern_total_words)
-                );
+                )?;
 
                 grand_total_words += pattern_total_words;
             }
-            Err(e) => eprintln!("Error processing pattern '{}': {}", pattern, e),
+            Err(e) => writeln!(writer, "Error processing pattern '{}': {}", pattern, e)?,
         }
     }
 
     // Print grand total if we processed at least one file.
     if files_processed > 0 {
-        println!("{:=<80}", "");  // Double separator line
-        println!(
+        writeln!(writer, "{:=<80}", "")?;  // Double separator line
+        writeln!(writer,
             "GRAND TOTAL ({} files processed):", 
             format_number(files_processed)
-        );
-        println!(
+        )?;
+        writeln!(writer,
             "Total unique words: {:>10}\nTotal words:       {:>10}\nUnique ratio:      {:>9.1}%",
             format_number(grand_total_unique.len()),
             format_number(grand_total_words),
             (grand_total_unique.len() as f64 / grand_total_words as f64) * 100.0
-        );
-        println!("{:=<80}", "");  // Double separator line
+        )?;
+        writeln!(writer, "{:=<80}", "")?;  // Double separator line
+    }
+    
+    Ok(())
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Err(_) = run(&args, &mut std::io::stdout()) {
+        std::process::exit(1);
     }
 }
 
@@ -219,11 +237,33 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
+    use zip::write::FileOptions;
 
     fn create_test_file(dir: &TempDir, filename: &str, content: &str) -> String {
         let file_path = dir.path().join(filename);
         let mut file = File::create(&file_path).unwrap();
         writeln!(file, "{}", content).unwrap();
+        file_path.to_str().unwrap().to_string()
+    }
+
+    fn create_docx_file(dir: &TempDir, filename: &str, content: &str) -> String {
+        let file_path = dir.path().join(filename);
+        let file = File::create(&file_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+
+        let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("word/document.xml", options).unwrap();
+        
+        // Wrap content in minimal XML
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+            <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">
+            <w:body><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:body></w:document>",
+            content
+        );
+        zip.write_all(xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+
         file_path.to_str().unwrap().to_string()
     }
 
@@ -313,5 +353,145 @@ mod tests {
             expected_total_words,
             "Aggregated total words should equal the sum of words in each file"
         );
+    }
+
+    #[test]
+    fn test_format_number() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(10), "10");
+        assert_eq!(format_number(100), "100");
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1000000), "1,000,000");
+        assert_eq!(format_number(123456789), "123,456,789");
+    }
+
+    #[test]
+    fn test_format_filename() {
+        assert_eq!(format_filename("short.txt", 10), "short.txt");
+        assert_eq!(format_filename("exactsize.txt", 13), "exactsize.txt");
+        assert_eq!(format_filename("longerfilename.txt", 10), "longerf...");
+        // Check edge case where max_len is very small
+        assert_eq!(format_filename("abcd", 3), "..."); 
+    }
+
+    #[test]
+    fn test_docx_extraction() {
+        let dir = TempDir::new().unwrap();
+        let file_path = create_docx_file(&dir, "test.docx", "Hello Docx World");
+        let result = count_words_in_file(&file_path).unwrap();
+        
+        assert_eq!(result.unique_words, 3);
+        assert_eq!(result.total_words, 3);
+    }
+
+    #[test]
+    fn test_run_usage() {
+        let args = vec!["mdwc".to_string()]; // No patterns provided
+        let mut buffer = Vec::new();
+        
+        let result = run(&args, &mut buffer);
+        assert!(result.is_err()); // Should return "Invalid usage" or similar error
+        
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Usage:"));
+        assert!(output.contains("Supported file types:"));
+    }
+
+    #[test]
+    fn test_run_file_processing() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(&dir, "run_test.txt", "hello run world");
+        
+        let pattern = format!("{}/*.txt", dir.path().to_str().unwrap());
+        let args = vec!["mdwc".to_string(), pattern];
+        let mut buffer = Vec::new();
+
+        let result = run(&args, &mut buffer);
+        assert!(result.is_ok());
+
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Analysis for files matching pattern"));
+        assert!(output.contains("run_test.txt"));
+        assert!(output.contains("3 unique words out of          3 total words"));
+        assert!(output.contains("GRAND TOTAL"));
+    }
+
+    #[test]
+    fn test_run_no_matching_files() {
+        let dir = TempDir::new().unwrap();
+        // Create no files
+        let pattern = format!("{}/*.txt", dir.path().to_str().unwrap());
+        let args = vec!["mdwc".to_string(), pattern];
+        let mut buffer = Vec::new();
+
+        let result = run(&args, &mut buffer);
+        assert!(result.is_ok()); // Should be ok, just prints error per pattern
+
+        let output = String::from_utf8(buffer).unwrap();
+        // Should contain the error for the pattern
+        assert!(output.contains("Error processing pattern"));
+        // Should NOT contain GRAND TOTAL
+        assert!(!output.contains("GRAND TOTAL"));
+    }
+
+    #[test]
+    fn test_pdf_branch_coverage() {
+        let dir = TempDir::new().unwrap();
+        // Create a dummy PDF file (invalid content)
+        // This won't successfully extract text, but it will enter the "pdf" match arm
+        // and likely return an Err from extract_text.
+        let file_path = create_test_file(&dir, "invalid.pdf", "not a real pdf");
+        
+        let result = count_words_in_file(&file_path);
+        // We expect an error because it's not a valid PDF
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_process_invalid_pdf_integration() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(&dir, "bad.pdf", "invalid pdf content");
+        
+        let pattern = format!("{}/*.pdf", dir.path().to_str().unwrap());
+        let args = vec!["mdwc".to_string(), pattern];
+        let mut buffer = Vec::new();
+
+        // This will find the file, try to process it, fail at extraction,
+        // and print to stderr (which we don't capture here, but we execute the path).
+        // The run function itself should return Ok because it handled the error gracefully.
+        let result = run(&args, &mut buffer);
+        assert!(result.is_ok());
+        
+        let output = String::from_utf8(buffer).unwrap();
+        // Since the error is printed to stderr in process_files (via eprintln!),
+        // and run() only prints to buffer on success of processing files,
+        // we might not see the file in the success list.
+        assert!(!output.contains("bad.pdf")); 
+        
+        // However, we verify that the Summary line is still printed (even if 0 files success)
+        // OR if the list was empty of successes, maybe it behaves differently.
+        // Actually, if results is empty (all failed), process_files returns Err("No files found...")
+        // Wait, process_files loop: if error occurs, it prints eprintln and continues.
+        // If ALL files fail, results is empty. process_files returns Err.
+        // So run() receives Err.
+        
+        // Let's check process_files logic again.
+        // for entry in glob...
+        //    if path.is_file() 
+        //       match count_words_in_file...
+        //          Ok -> results.push
+        //          Err -> eprintln (Line 84)
+        // if results.is_empty() -> Err("No files found...")
+        
+        // So if we only have 1 bad file, results is empty, so run() gets Err.
+        // Let's include one GOOD file too, so process_files returns Ok, but still hits the error path for the bad one.
+        create_test_file(&dir, "good.txt", "hello");
+        let pattern_all = format!("{}/*.*", dir.path().to_str().unwrap());
+        let args_all = vec!["mdwc".to_string(), pattern_all];
+        
+        let mut buffer2 = Vec::new(); // Use a new buffer
+        let result_all = run(&args_all, &mut buffer2);
+        // Now we should have 1 success, so process_files returns Ok.
+        assert!(result_all.is_ok());
     }
 }
