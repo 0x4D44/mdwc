@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
+use colored::*;
 use glob::glob;
 use pdf_extract::extract_text;
 use regex::Regex;
@@ -79,6 +80,12 @@ pub fn process_files(pattern: &str) -> Result<Vec<WordCount>, Box<dyn Error>> {
         match entry {
             Ok(path) => {
                 if path.is_file() {
+                    // Skip temporary Word files (start with ~$)
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("~$") {
+                            continue;
+                        }
+                    }
                     match count_words_in_file(path.to_str().unwrap()) {
                         Ok(count) => results.push(count),
                         Err(e) => eprintln!("Error processing {}: {}", path.display(), e),
@@ -151,8 +158,10 @@ pub fn run(args: &[String], writer: &mut impl std::io::Write) -> Result<(), Box<
     for pattern in &args[1..] {
         match process_files(pattern) {
             Ok(results) => {
-                writeln!(writer, "\nAnalysis for files matching pattern '{}':", pattern)?;
-                writeln!(writer, "{:-<80}", "")?;  // Print a separator line
+                writeln!(writer, "\n{} '{}':",
+                    "Analysis for files matching pattern".blue().bold(),
+                    pattern.yellow())?;
+                writeln!(writer, "{}", "-".repeat(80).dimmed())?;
                 
                 let mut pattern_total_words = 0;
                 let mut pattern_unique_words = HashSet::new();
@@ -181,10 +190,12 @@ pub fn run(args: &[String], writer: &mut impl std::io::Write) -> Result<(), Box<
                     
                     // Print file results using fixed-width formatting.
                     writeln!(writer,
-                        "{:<width$}: {:>10} unique words out of {:>10} total words",
+                        "{:<width$}: {:>10} {} {:>10} {}",
                         display_name,
-                        format_number(result.unique_words),
-                        format_number(result.total_words),
+                        format_number(result.unique_words).cyan(),
+                        "unique words out of".dimmed(),
+                        format_number(result.total_words).cyan(),
+                        "total words".dimmed(),
                         width = FILENAME_WIDTH
                     )?;
                     
@@ -192,39 +203,55 @@ pub fn run(args: &[String], writer: &mut impl std::io::Write) -> Result<(), Box<
                 }
 
                 // Print pattern summary.
-                writeln!(writer, "{:-<80}", "")?;  // Separator line
+                writeln!(writer, "{}", "-".repeat(80).dimmed())?;
                 writeln!(writer,
-                    "Summary for pattern: {:>10} unique words out of {:>10} total words\n",
-                    format_number(pattern_unique_words.len()),
-                    format_number(pattern_total_words)
+                    "{} {:>10} {} {:>10} {}\n",
+                    "Summary for pattern:".blue().bold(),
+                    format_number(pattern_unique_words.len()).bright_cyan(),
+                    "unique words out of".dimmed(),
+                    format_number(pattern_total_words).bright_cyan(),
+                    "total words".dimmed()
                 )?;
 
                 grand_total_words += pattern_total_words;
             }
-            Err(e) => writeln!(writer, "Error processing pattern '{}': {}", pattern, e)?,
+            Err(e) => writeln!(writer, "{} processing pattern '{}': {}",
+                "Error".red().bold(), pattern.yellow(), e)?,
         }
     }
 
     // Print grand total if we processed at least one file.
     if files_processed > 0 {
-        writeln!(writer, "{:=<80}", "")?;  // Double separator line
+        writeln!(writer, "{}", "=".repeat(80).blue())?;
         writeln!(writer,
-            "GRAND TOTAL ({} files processed):", 
-            format_number(files_processed)
+            "{} ({} files processed):",
+            "GRAND TOTAL".blue().bold(),
+            format_number(files_processed).bright_yellow()
         )?;
+        let ratio = (grand_total_unique.len() as f64 / grand_total_words as f64) * 100.0;
         writeln!(writer,
-            "Total unique words: {:>10}\nTotal words:       {:>10}\nUnique ratio:      {:>9.1}%",
-            format_number(grand_total_unique.len()),
-            format_number(grand_total_words),
-            (grand_total_unique.len() as f64 / grand_total_words as f64) * 100.0
+            "{} {:>10}\n{} {:>10}\n{} {}",
+            "Total unique words:".dimmed(),
+            format_number(grand_total_unique.len()).bright_cyan(),
+            "Total words:       ".dimmed(),
+            format_number(grand_total_words).bright_cyan(),
+            "Unique ratio:      ".dimmed(),
+            format!("{:>9.1}%", ratio).green()
         )?;
-        writeln!(writer, "{:=<80}", "")?;  // Double separator line
+        writeln!(writer, "{}", "=".repeat(80).blue())?;
     }
     
     Ok(())
 }
 
 fn main() {
+    // Print version header
+    println!(
+        "{} {}",
+        env!("CARGO_PKG_NAME").bright_cyan().bold(),
+        format!("v{}", env!("CARGO_PKG_VERSION")).bright_yellow()
+    );
+
     let args: Vec<String> = std::env::args().collect();
     if let Err(_) = run(&args, &mut std::io::stdout()) {
         std::process::exit(1);
