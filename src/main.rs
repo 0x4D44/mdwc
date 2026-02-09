@@ -129,33 +129,70 @@ fn format_filename(name: &str, max_len: usize) -> String {
     }
 }
 
+fn print_usage(program: &str, writer: &mut impl std::io::Write) -> Result<(), Box<dyn Error>> {
+    writeln!(writer, "Usage: {} [options] <file_pattern> [file_pattern...]", program)?;
+    writeln!(writer)?;
+    writeln!(writer, "Options:")?;
+    writeln!(writer, "  -h, --help       Show this help message")?;
+    writeln!(writer, "  -r, --recurse    Search subdirectories recursively")?;
+    writeln!(writer)?;
+    writeln!(writer, "Supported file types: .txt, .pdf, .docx")?;
+    writeln!(writer)?;
+    writeln!(writer, "Examples:")?;
+    writeln!(writer, "  {} *.txt", program)?;
+    writeln!(writer, "  {} *.pdf", program)?;
+    writeln!(writer, "  {} *.docx", program)?;
+    writeln!(writer, "  {} docs/*.{{txt,pdf,docx}}", program)?;
+    writeln!(writer, "  {} -r *.txt", program)?;
+    Ok(())
+}
+
 pub fn run(args: &[String], writer: &mut impl std::io::Write) -> Result<(), Box<dyn Error>> {
-    if args.len() < 1 {
-        // This case essentially shouldn't happen with std::env::args() usually having at least 1 (the binary name),
-        // but if we pass a slice of args excluding binary name, we might see 0.
-        // Let's assume input args are [pattern1, pattern2...] (excluding binary name) for the logic loop,
-        // OR we stick to the convention that args[0] is binary name.
-        // The original code used args[1..], so let's stick to receiving the full args vector.
+    if args.is_empty() {
         return Err("Not enough arguments".into());
     }
-    
-    // Check if we have patterns (i.e. length >= 2 if args[0] is binary)
-    if args.len() < 2 {
-        writeln!(writer, "Usage: {} <file_pattern> [file_pattern...]", args[0])?;
-        writeln!(writer, "Supported file types: .txt, .pdf, .docx")?;
-        writeln!(writer, "Examples:")?;
-        writeln!(writer, "  {} *.txt", args[0])?;
-        writeln!(writer, "  {} *.pdf", args[0])?;
-        writeln!(writer, "  {} *.docx", args[0])?;
-        writeln!(writer, "  {} docs/*.{{txt,pdf,docx}}", args[0])?;
+
+    let mut show_help = false;
+    let mut recurse = false;
+    let mut patterns: Vec<&str> = Vec::new();
+
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "-h" | "--help" => show_help = true,
+            "-r" | "--recurse" => recurse = true,
+            _ => patterns.push(arg),
+        }
+    }
+
+    if show_help {
+        print_usage(&args[0], writer)?;
+        return Ok(());
+    }
+
+    if patterns.is_empty() {
+        print_usage(&args[0], writer)?;
         return Err("Invalid usage".into());
     }
+
+    let effective_patterns: Vec<String> = patterns.iter().map(|p| {
+        if recurse && !p.contains("**/") {
+            // Insert **/ before the filename component so that
+            // "dir/*.txt" becomes "dir/**/*.txt" and
+            // "*.txt" becomes "**/*.txt"
+            match p.rfind(|c| c == '/' || c == '\\') {
+                Some(pos) => format!("{}/**/{}", &p[..pos], &p[pos + 1..]),
+                None => format!("**/{}", p),
+            }
+        } else {
+            p.to_string()
+        }
+    }).collect();
 
     let mut grand_total_words = 0;
     let mut grand_total_unique = HashSet::new();
     let mut files_processed = 0;
 
-    for pattern in &args[1..] {
+    for pattern in &effective_patterns {
         match process_files(pattern) {
             Ok(results) => {
                 writeln!(writer, "\n{} '{}':",
@@ -415,13 +452,72 @@ mod tests {
     fn test_run_usage() {
         let args = vec!["mdwc".to_string()]; // No patterns provided
         let mut buffer = Vec::new();
-        
+
         let result = run(&args, &mut buffer);
         assert!(result.is_err()); // Should return "Invalid usage" or similar error
-        
+
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("Usage:"));
         assert!(output.contains("Supported file types:"));
+        assert!(output.contains("--help"));
+        assert!(output.contains("--recurse"));
+    }
+
+    #[test]
+    fn test_help_flag_short() {
+        let args = vec!["mdwc".to_string(), "-h".to_string()];
+        let mut buffer = Vec::new();
+
+        let result = run(&args, &mut buffer);
+        assert!(result.is_ok()); // --help exits successfully
+
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Usage:"));
+        assert!(output.contains("--help"));
+        assert!(output.contains("--recurse"));
+    }
+
+    #[test]
+    fn test_help_flag_long() {
+        let args = vec!["mdwc".to_string(), "--help".to_string()];
+        let mut buffer = Vec::new();
+
+        let result = run(&args, &mut buffer);
+        assert!(result.is_ok());
+
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Usage:"));
+    }
+
+    #[test]
+    fn test_recurse_flag() {
+        let dir = TempDir::new().unwrap();
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        create_test_file(&dir, "top.txt", "hello world");
+
+        // Create a file in the subdirectory
+        let sub_path = subdir.join("nested.txt");
+        let mut f = File::create(&sub_path).unwrap();
+        writeln!(f, "nested content here").unwrap();
+
+        // Without -r: only top-level matches
+        let pattern = format!("{}/*.txt", dir.path().to_str().unwrap());
+        let args = vec!["mdwc".to_string(), pattern];
+        let mut buffer = Vec::new();
+        run(&args, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("top.txt"));
+        assert!(!output.contains("nested.txt"));
+
+        // With -r: matches subdirectories too
+        let pattern_r = format!("{}/*.txt", dir.path().to_str().unwrap());
+        let args_r = vec!["mdwc".to_string(), "-r".to_string(), pattern_r];
+        let mut buffer_r = Vec::new();
+        run(&args_r, &mut buffer_r).unwrap();
+        let output_r = String::from_utf8(buffer_r).unwrap();
+        assert!(output_r.contains("top.txt"));
+        assert!(output_r.contains("nested.txt"));
     }
 
     #[test]
